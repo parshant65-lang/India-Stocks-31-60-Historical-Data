@@ -174,7 +174,7 @@ print(df.head())
 ---
 
 ## 🔄 Daily Automated Cloud Ingestion
-A GitHub Actions workflow runs every weekday post-market (**Monday to Friday at 16:30 IST / 11:00 UTC**) to query Yahoo Finance, slice newly closed 1-minute sessions into daily CSVs, de-duplicate timestamps, and commit updates automatically.
+A GitHub Actions workflow runs every weekday post-market (**Monday to Friday at 15:30 IST / 10:00 UTC**) to query Yahoo Finance, slice newly closed 1-minute sessions into daily CSVs, de-duplicate timestamps, and commit updates automatically.
 """
 
 with open("README.md", "w") as f:
