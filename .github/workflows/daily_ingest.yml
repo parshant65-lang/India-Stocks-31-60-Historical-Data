@@ -1,0 +1,37 @@
+name: Ingest India Stocks 31-60 Daily 1m Klines
+
+on:
+  schedule:
+    # Run every weekday Monday to Friday at 16:30 IST (11:00 UTC)
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install yfinance pandas
+
+      - name: Run Stocks 31-60 Ingestion
+        run: |
+          python fetch_batch.py
+
+      - name: Commit and Push Updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Automated daily 1m kline capture for India Stocks 31-60" && git push)
