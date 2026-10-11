@@ -3,7 +3,7 @@ name: Ingest India Stocks 31-60 Daily 1m Klines
 on:
   schedule:
     # Run every weekday Monday to Friday at 15:30 IST (10:00 UTC)
-    - cron: '0 10 * * 1-5'
+    - cron: '5 10 * * *'
   workflow_dispatch:
 
 permissions:
