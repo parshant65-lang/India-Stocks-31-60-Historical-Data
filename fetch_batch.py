@@ -39,145 +39,128 @@ COMPANIES = {
     "HDFCAMC": ("HDFC Asset Management Company Ltd", "HDFCAMC.NS")
 }
 
-now = datetime.datetime.now(datetime.timezone.utc)
-print(f"=== India Equities Batch 31-60 Ingestion (UTC Now: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
 
-total_new_candles = 0
-
-for folder_name, (full_name, yf_ticker) in COMPANIES.items():
-    print(f"\nProcessing {folder_name} ({yf_ticker})...")
-    try:
-        ticker = yf.Ticker(yf_ticker)
-        df = ticker.history(period="7d", interval="1m")
-    except Exception as e:
-        print(f"Error fetching {yf_ticker}: {e}")
-        continue
+def fetch_and_save_company(symbol, company_name, default_ticker):
+    print(f"Fetching 1m data for {symbol} ({company_name})...")
+    candidates = [
+        default_ticker,
+        f"{symbol}.NS",
+        f"{symbol.replace('&', '-')}.NS",
+        f"{symbol.replace('&', '_')}.NS",
+        f"{symbol}.BO"
+    ]
+    df = None
+    for cand in candidates:
+        try:
+            ticker = yf.Ticker(cand)
+            cand_df = ticker.history(period="7d", interval="1m")
+            if not cand_df.empty:
+                df = cand_df
+                break
+        except Exception:
+            continue
 
     if df is None or df.empty:
-        print(f"No data returned for {yf_ticker}")
-        continue
+        print(f"No data returned for {symbol} across candidates")
+        return False, 0
 
     rows = []
     for idx, row in df.iterrows():
-        ts = int(idx.timestamp() * 1000)
-        dt_utc = idx.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
-        rows.append([ts, dt_utc, float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"]), float(row["Volume"])])
-
-    incoming_df = pd.DataFrame(rows, columns=HEADERS)
-    incoming_df.drop_duplicates(subset=["timestamp"], inplace=True)
-    incoming_df.sort_values(by="timestamp", inplace=True)
-
-    company_root = os.path.join(folder_name, "1m")
-    os.makedirs(company_root, exist_ok=True)
-
-    # Symbol README
-    with open(os.path.join(company_root, "README.md"), "w") as f:
-        f.write(f"# {full_name} ({folder_name}) 1-Minute Historical Kline Dataset\n\n- **Symbol:** `{folder_name}` (NSE: `{yf_ticker}`)\n- **Market:** National Stock Exchange of India (NSE)\n- **Timeframe:** 1 Minute (`1m`)\n- **Trading Hours:** Monday - Friday 09:15 to 15:30 IST (03:45 to 10:00 UTC)\n- **Schema:** `timestamp, datetime_utc, open, high, low, close, volume`\n")
-
-    # Group by date YYYY-MM-DD
-    grouped = incoming_df.groupby(incoming_df["datetime_utc"].str[:10])
-    for day_str, grp in grouped:
-        y, m = day_str[:4], day_str[5:7]
-        target_dir = os.path.join(company_root, y, m)
-        os.makedirs(target_dir, exist_ok=True)
-        csv_file = os.path.join(target_dir, f"{folder_name}_1m_{day_str}.csv")
-
-        if os.path.exists(csv_file):
-            try:
-                existing_df = pd.read_csv(csv_file)
-                combined = pd.concat([existing_df, grp], ignore_index=True)
-                combined.drop_duplicates(subset=["timestamp"], keep="last", inplace=True)
-                combined.sort_values(by="timestamp", inplace=True)
-                combined[HEADERS].to_csv(csv_file, index=False)
-            except Exception:
-                grp[HEADERS].to_csv(csv_file, index=False)
+        ts_utc = idx.to_pydatetime()
+        if ts_utc.tzinfo is None:
+            ts_utc = ts_utc.replace(tzinfo=datetime.timezone.utc)
         else:
-            grp[HEADERS].to_csv(csv_file, index=False)
+            ts_utc = ts_utc.astimezone(datetime.timezone.utc)
 
-    print(f"Saved {len(incoming_df):,} candles across {len(grouped)} trading days for {folder_name}.")
-    total_new_candles += len(incoming_df)
+        epoch_ms = int(ts_utc.timestamp() * 1000)
+        dt_utc_str = ts_utc.strftime("%Y-%m-%d %H:%M:%S")
 
-# Dynamic Master README Calculation
-total_csv_files = 0
-total_candles_all = 0
-for root, dirs, files in os.walk("."):
-    for f in files:
-        if f.endswith(".csv") and not f.startswith("."):
-            total_csv_files += 1
-            with open(os.path.join(root, f), "r") as fl:
-                total_candles_all += max(0, sum(1 for _ in fl) - 1)
+        raw_vol = row.get("Volume", 0)
+        try:
+            vol_int = int(round(float(raw_vol))) if pd.notna(raw_vol) else 0
+            vol_int = max(0, vol_int)
+        except Exception:
+            vol_int = 0
 
-master_readme = f"""# India Public Equities (Constituents 31 to 60) - 1-Minute Historical Kline Archive
+        rows.append({
+            "timestamp": epoch_ms,
+            "datetime_utc": dt_utc_str,
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+            "volume": vol_int,
+            "date_utc": ts_utc.strftime("%Y-%m-%d")
+        })
 
-An institutional-grade, open-source archive of cleaned, standardized, and validated **1-minute intraday historical candlestick data** for **India's Top Liquid Companies (Batch 31 to 60)** with daily automated cloud ingestion.
+    full_df = pd.DataFrame(rows)
+    grouped = full_df.groupby("date_utc")
+    total_candles = 0
 
----
+    for date_str, group in grouped:
+        year, month, _ = date_str.split("-")
+        folder = os.path.join(symbol, "1m", year, month)
+        os.makedirs(folder, exist_ok=True)
+        csv_path = os.path.join(folder, f"{symbol}_1m_{date_str}.csv")
 
-## 🏛️ Directory Architecture & Strict Date-Wise Hierarchy
+        to_write = group[HEADERS].copy()
+        to_write["volume"] = pd.to_numeric(to_write["volume"], errors="coerce").fillna(0).astype("int64")
+        to_write["timestamp"] = pd.to_numeric(to_write["timestamp"], errors="coerce").astype("int64")
 
-Every stock is strictly organized into daily CSVs partitioned by Year/Month/Date:
+        if os.path.exists(csv_path):
+            existing = pd.read_csv(csv_path)
+            combined = pd.concat([existing, to_write], ignore_index=True)
+            combined = combined.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
+            combined["volume"] = pd.to_numeric(combined["volume"], errors="coerce").fillna(0).astype("int64")
+            combined["timestamp"] = pd.to_numeric(combined["timestamp"], errors="coerce").astype("int64")
+            for c in ["open", "high", "low", "close"]:
+                if c in combined.columns:
+                    combined[c] = combined[c].round(4)
+            combined[HEADERS].to_csv(csv_path, index=False)
+            total_candles += len(combined)
+        else:
+            to_write = to_write.sort_values("timestamp")
+            to_write[HEADERS].to_csv(csv_path, index=False)
+            total_candles += len(to_write)
 
-```text
-India-Stocks-31-60-Historical-Data/
-├── ABB/
-│   └── 1m/
-│       ├── README.md
-│       └── 2026/
-│           └── 10/
-│               ├── ABB_1m_2026-10-01.csv
-│               ├── ABB_1m_2026-10-05.csv
-│               └── ABB_1m_2026-10-09.csv
-├── DMART/
-│   └── 1m/...
-└── ... [All 30 Companies]
-```
+    return True, total_candles
 
----
+def sanitize_existing_csvs():
+    for root, dirs, files in os.walk("."):
+        for f in files:
+            if f.endswith(".csv") and "_1m_" in f:
+                p = os.path.join(root, f)
+                try:
+                    df = pd.read_csv(p)
+                    if "volume" in df.columns:
+                        needs_clean = False
+                        if df["volume"].dtype != "int64":
+                            needs_clean = True
+                        elif df["volume"].astype(str).str.contains(r"\.[0-9]+$", regex=True).any():
+                            needs_clean = True
+                        
+                        if needs_clean:
+                            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+                            df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce").astype("int64")
+                            for c in ["open", "high", "low", "close"]:
+                                if c in df.columns:
+                                    df[c] = df[c].round(4)
+                            df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
+                            df[HEADERS].to_csv(p, index=False)
+                except Exception:
+                    pass
 
-## 📊 Dataset Overview
-- **Constituents:** 30 Benchmark Companies (Rank 31 to 60)
-- **Timeframe:** 1 Minute (`1m`)
-- **Total Archived Daily Files:** `{total_csv_files}` sessions
-- **Total 1-Minute Candles:** `{total_candles_all:,}` candles
-- **Last Ingested:** `{now.strftime('%Y-%m-%d %H:%M:%S')} UTC`
-- **Trading Sessions:** Monday – Friday, 09:15 to 15:30 IST (03:45 to 10:00 UTC)
+def main():
+    print("Starting automated ingestion for batch...")
+    sanitize_existing_csvs()
+    success_count = 0
+    total_candles = 0
+    for symbol, (cname, ticker) in COMPANIES.items():
+        ok, candles = fetch_and_save_company(symbol, cname, ticker)
+        if ok:
+            success_count += 1
+            total_candles += candles
+    print(f"Batch completed: {success_count}/{len(COMPANIES)} companies ingested, {total_candles} candles.")
 
----
-
-## 📑 Data Schema (Uniform Across All Files)
-
-| Column Name | Type | Description | Example |
-| :--- | :--- | :--- | :--- |
-| `timestamp` | `int64` | Candle open time in Unix milliseconds (UTC) | `1791517500000` |
-| `datetime_utc` | `string` | Standard ISO human-readable UTC timestamp | `2026-10-09 03:45:00` |
-| `open` | `float64` | Opening price in INR | `7845.00` |
-| `high` | `float64` | Highest price reached during the 1-minute window | `7860.00` |
-| `low` | `float64` | Lowest price reached during the 1-minute window | `7830.00` |
-| `close` | `float64` | Closing price of the 1-minute candle | `7852.50` |
-| `volume` | `float64` | Cumulative volume traded in the 1-minute candle | `1420` |
-
----
-
-## ⚡ 1-Line Pandas Stream Loader (No Clone Required)
-
-Stream any stock's 1-minute data directly from GitHub's raw CDN into Pandas in 1 second:
-
-```python
-import pandas as pd
-
-# Load ABB 1-minute data for October 09, 2026
-url = "https://raw.githubusercontent.com/parshant65-lang/India-Stocks-31-60-Historical-Data/main/ABB/1m/2026/10/ABB_1m_2026-10-09.csv"
-df = pd.read_csv(url)
-print(df.head())
-```
-
----
-
-## 🔄 Daily Automated Cloud Ingestion
-A GitHub Actions workflow runs every weekday post-market (**Monday to Friday at 15:30 IST / 10:00 UTC**) to query Yahoo Finance, slice newly closed 1-minute sessions into daily CSVs, de-duplicate timestamps, and commit updates automatically.
-"""
-
-with open("README.md", "w") as f:
-    f.write(master_readme)
-
-print("\n🎉 Batch 31-60 ingestion and master README generation complete!")
+if __name__ == "__main__":
+    main()
